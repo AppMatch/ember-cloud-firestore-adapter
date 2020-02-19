@@ -62,7 +62,7 @@ export default Adapter.extend({
       db.settings(this.firestoreSettings);
     }
 
-    if (this.firebase.performance) this.performance = this.firebase.performance();
+    if (this.usePerformance && this.firebase.performance) this.performance = this.firebase.performance();
 
     this.set('realtimeTracker', new RealtimeTracker());
   },
@@ -486,11 +486,12 @@ export default Adapter.extend({
   },
 
   // allow tracing in the application adapter with usePerformance: true
+  // make it false in test env because it will fail initiating performance
   //
   // u can define attributes you want to add to every trace there as well
   //
   // export default CloudFirestoreAdapter.extend({
-  //   usePerformance: true,
+  //   usePerformance: ENV.environment !== 'test',
   //
   //   traceAttrs: computed('user', function () {
   //     return {userId: user.id}
