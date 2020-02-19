@@ -62,6 +62,8 @@ export default Adapter.extend({
       db.settings(this.firestoreSettings);
     }
 
+    if (this.firebase.performance) this.performance = this.firebase.performance();
+
     this.set('realtimeTracker', new RealtimeTracker());
   },
 
@@ -88,8 +90,15 @@ export default Adapter.extend({
   async updateRecord(store, type, snapshot) {
     const docRef = this.buildCollectionRef(type, snapshot.adapterOptions).doc(snapshot.id);
     const batch = this.buildWriteBatch(docRef, snapshot);
+    const trace = this.startTrace(`updateRecord:${type.modelName}`,{
+      traceAttrs: {
+        id: snapshot.id
+      }
+    });
 
     await batch.commit();
+
+    this.stopTrace(trace);
 
     if (this.getAdapterOptionConfig(snapshot, 'isRealtime') && !this.isFastBoot) {
       return this.findRecord(store, type, snapshot.id, snapshot);
@@ -124,6 +133,15 @@ export default Adapter.extend({
    * @override
    */
   async findRecord(store, type, id, snapshot = {}) {
+    let trace;
+
+    if (!snapshot.adapterOptions || !snapshot.adapterOptions.noTrace)
+      trace = this.startTrace(`findRecord:${type.modelName}`,{
+        traceAttrs: {
+          id: id
+        }
+      });
+
     return new Promise((resolve, reject) => {
       const docRef = this.buildCollectionRef(type, snapshot.adapterOptions).doc(id);
       const unsubscribe = docRef.onSnapshot((docSnapshot) => {
@@ -131,6 +149,8 @@ export default Adapter.extend({
           if (this.getAdapterOptionConfig(snapshot, 'isRealtime') && !this.isFastBoot) {
             this.realtimeTracker.trackFindRecordChanges(type.modelName, docRef, store);
           }
+
+          this.stopTrace(trace);
 
           resolve(flattenDocSnapshotData(docSnapshot));
         } else {
@@ -146,6 +166,8 @@ export default Adapter.extend({
    * @override
    */
   async findAll(store, type, sinceToken, snapshotRecordArray) {
+    const trace = this.startTrace(`findAll:${type.modelName}`);
+
     return new Promise((resolve, reject) => {
       const db = this.firebase.firestore();
       const collectionRef = db.collection(buildCollectionName(type.modelName));
@@ -154,11 +176,18 @@ export default Adapter.extend({
           this.realtimeTracker.trackFindAllChanges(type.modelName, collectionRef, store);
         }
 
+        if (snapshotRecordArray.adapterOptions) snapshotRecordArray.adapterOptions.noTrace = true;
+        else snapshotRecordArray.adapterOptions = {noTrace: true};
+
         const requests = querySnapshot.docs.map(docSnapshot => (
           this.findRecord(store, type, docSnapshot.id, snapshotRecordArray)
         ));
 
-        Promise.all(requests).then(records => resolve(records)).catch(error => (
+        Promise.all(requests).then(records => {
+          this.stopTrace(trace,records);
+
+          resolve(records)
+        }).catch(error => (
           reject(new Error(error.message))
         ));
 
@@ -190,6 +219,13 @@ export default Adapter.extend({
    * @override
    */
   async findHasMany(store, snapshot, url, relationship) {
+    const trace = this.startTrace(`findHasMany:${relationship.type}`,{
+      traceAttrs: {
+        parent: snapshot.modelName,
+        id: snapshot.id,
+      }
+    });
+
     return new Promise((resolve, reject) => {
       const collectionRef = this.buildHasManyCollectionRef(store, snapshot, url, relationship);
       const unsubscribe = collectionRef.onSnapshot((querySnapshot) => {
@@ -205,7 +241,11 @@ export default Adapter.extend({
 
         const requests = this.findHasManyRecords(store, relationship, querySnapshot);
 
-        Promise.all(requests).then(records => resolve(records)).catch(error => (
+        Promise.all(requests).then(records => {
+          this.stopTrace(trace,records);
+
+          resolve(records)
+        }).catch(error => (
           reject(new Error(error.message))
         ));
 
@@ -218,6 +258,8 @@ export default Adapter.extend({
    * @override
    */
   async query(store, type, query, recordArray) {
+    const trace = this.startTrace(`query:${type.modelName}`,query);
+
     return new Promise((resolve, reject) => {
       const collectionRef = this.buildCollectionRef(type, query);
       const firestoreQuery = this.buildQuery(collectionRef, query);
@@ -231,7 +273,11 @@ export default Adapter.extend({
 
         const requests = this.findQueryRecords(store, type, query, querySnapshot);
 
-        Promise.all(requests).then(records => resolve(records)).catch(error => (
+        Promise.all(requests).then(records => {
+          this.stopTrace(trace,records,query);
+
+          resolve(records)
+        }).catch(error => (
           reject(new Error(error.message))
         ));
 
@@ -363,6 +409,7 @@ export default Adapter.extend({
         return this.findRecord(store, type, referenceTo.id, {
           adapterOptions: {
             isRealtime: relationship.options.isRealtime,
+            noTrace: true,
 
             buildReference() {
               return referenceTo.parent;
@@ -372,6 +419,8 @@ export default Adapter.extend({
       }
 
       const adapterOptions = assign({}, relationship.options, {
+        noTrace: true,
+
         buildReference() {
           return docSnapshot.ref.parent;
         },
@@ -398,6 +447,7 @@ export default Adapter.extend({
         const request = this.findRecord(store, type, referenceTo.id, {
           adapterOptions: {
             isRealtime: option.isRealtime,
+            noTrace: true,
 
             buildReference() {
               return referenceTo.parent;
@@ -409,6 +459,8 @@ export default Adapter.extend({
       }
 
       const adapterOptions = assign({}, option, {
+        noTrace: true,
+
         buildReference() {
           return docSnapshot.ref.parent;
         },
@@ -432,4 +484,66 @@ export default Adapter.extend({
       return null;
     }
   },
+
+  // allow tracing in the application adapter with usePerformance: true
+  //
+  // u can define attributes you want to add to every trace there as well
+  //
+  // export default CloudFirestoreAdapter.extend({
+  //   usePerformance: true,
+  //
+  //   traceAttrs: computed('user', function () {
+  //     return {userId: user.id}
+  //   })
+  // });
+  //
+  // also u can add attributes and metrics to the trace for queries like
+  //
+  // this.store.query('collection',{
+  //   traceAttrs: {route: route},
+  //   traceMetrics(records) {
+  //     return {commentCount: records.reduce((count,result) => {
+  //       count += record.comments.length;
+  //       return count
+  //     },0)}
+  //   }
+  //
+  //   filter(reference) {
+  //     return reference.where('field', '==', value)
+  //   }
+  // })
+  startTrace(name,options={}) {
+    if (!this.usePerformance || !this.performance || !name) return;
+
+    const trace = this.performance.trace(name);
+
+    trace.start();
+
+    const traceAttributes = {};
+
+    if (options.queryId) traceAttributes.queryId = options.queryId;
+    if (options.traceAttrs) Object.assign(traceAttributes,options.traceAttrs);
+    if (this.traceAttrs) Object.assign(traceAttributes,this.traceAttrs);
+
+    Object.entries(traceAttributes).forEach(([key,val]) => trace.putAttribute(key,val));
+
+    return trace
+  },
+
+  stopTrace(trace,records=[],options={}) {
+    if (!trace) return;
+
+    const metricsUpdate = {};
+
+    if (records.length) metricsUpdate.count = records.length;
+    if (options.traceMetrics) Object.assign(metricsUpdate,options.traceMetrics(records));
+
+    Object.entries(metricsUpdate).forEach(([key,val]) => {
+      const int = parseInt(val);
+
+      if (!isNaN(int)) trace.putMetric(key,int)
+    });
+
+    trace.stop()
+  }
 });
