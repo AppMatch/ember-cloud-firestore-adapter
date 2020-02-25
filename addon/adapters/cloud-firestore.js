@@ -446,7 +446,7 @@ export default Adapter.extend({
       if (referenceTo && referenceTo.firestore) {
         const request = this.findRecord(store, type, referenceTo.id, {
           adapterOptions: {
-            isRealtime: option.isRealtime,
+            isRealtime: option.allRealtime,
             noTrace: true,
 
             buildReference() {
