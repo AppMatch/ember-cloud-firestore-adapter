@@ -408,7 +408,7 @@ export default Adapter.extend({
       if (referenceTo && referenceTo.firestore) {
         return this.findRecord(store, type, referenceTo.id, {
           adapterOptions: {
-            isRealtime: relationship.options.isRealtime,
+            isRealtime: relationship.options.allRealtime,
             noTrace: true,
 
             buildReference() {
